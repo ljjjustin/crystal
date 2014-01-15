@@ -1,0 +1,28 @@
+title List Server workflow
+
+participant client
+participant nova_api
+participant database
+
+client -> +nova_api: GET instance info
+note over nova_api: update search options
+note over nova_api: remove invalid search options
+note over nova_api: update search options by status
+note over nova_api: update search options by instance boot time
+note over nova_api: update search options by user permission
+note over nova_api: get limit and page maker
+note over nova_api: convert search options into filter mapping
+nova_api -> database: instance_get_all_by_filters
+note over database: query instance by filters
+database -> nova_api: instances info
+note over nova_api: convert instance's info into dict
+opt "is detail ?"
+    note over nova_api: get instance fault info
+    nova_api -> database: instance_fault_get_by_instance_uuids
+    note over database: query instance fault info
+    database -> nova_api: instance fault info
+    note over nova_api: update instance's fault field
+end
+note over nova_api: build response info
+note over nova_api: cache instance's info
+nova_api -> -client: instance info
