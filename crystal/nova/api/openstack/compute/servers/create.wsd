@@ -1,0 +1,223 @@
+title Instance create process
+
+participant client
+participant nova_api
+participant glance_api
+participant network_api
+participant database
+participant task_queue
+participant nova_scheduler
+participant nova_condutor
+participant nova_compute
+participant libvirtd
+
+# nova api
+client -> +nova_api: POST create instance request
+note over nova_api: check if 'server' exists in request body
+note over nova_api: get or generate server admin password
+note over nova_api: get and validate server name
+note over nova_api: get image uuid from request body
+note over nova_api: get personality from request body
+note over nova_api: extract injected files from personality
+note over nova_api: get assocated security groups
+note over nova_api: get requested networks
+note over nova_api: get and validate ip address
+note over nova_api: get flavor id from request body
+note over nova_api: get keypair name from request body
+note over nova_api: get and validate user data
+note over nova_api: get available zones
+note over nova_api: get and validate block device mapping
+note over nova_api: get server counts
+note over nova_api: get scheduler hints
+
+nova_api -> database: get specified flavor info
+note over database: query flavor info
+database -> nova_api: flavor info
+note over nova_api: check create policies
+nova_api -> glance_api: get image info
+note over glance_api: query image info
+glance_api -> nova_api: image info
+note over nova_api: ensure auto disk config
+note over nova_api: handle availability zone
+opt "availability zone is not None"
+    note over nova_api: verify availability zone
+    nova_api -> database: service_get_all
+    note over database: query all enabled services
+    database -> nova_api: services info
+    note over nova_api: update service availability
+end
+opt "user data is not None"
+    note over nova_api: try to decode user data
+end
+note over nova_api: check metadata quota
+nova_api -> database: get_user_quotas or get_project_quotas
+note over database: query quota info
+database -> nova_api: quota info
+note over nova_api: check injected file quota
+note over nova_api: check if flavor image size is too small
+note over nova_api: check request security groups
+loop "check if we can get specified security groups"
+    nova_api -> network_api: get security group info
+end
+note over nova_api: check requesed networks
+nova_api -> network_api: validate_networks
+note over network_api: validate networks
+network_api -> nova_api: validation result
+opt "if image has kernel or ramdisk"
+    note over nova_api: check kernel and ramdisk
+    nova_api -> glance_api: show kernel
+    nova_api -> glance_api: show ramdisk
+end
+opt "get key_data if key_name is not None"
+    note over nova_api: get key_data by key_name
+    nova_api -> database: key_pair_get
+    note over database: query key pair info
+    database -> nova_api: key pair info
+end
+note over nova_api: save flavor info to instance's system metadata
+note over nova_api: update image related options
+alt "create database entry"
+    note over nova_api: check block device mapping
+    note over nova_api: reserve quota for instance
+    nova_api -> database: quota_reserve
+    note over database: reserve quota
+    database -> nova_api: operation result
+    nova over nova_api: create db entry for instance
+    nova_api -> database: instance_create
+    note over database: store instance info
+    database -> nova_api: done
+    nova_api -> task_queue: "notification: vm_states.BUILDING"
+    note over nova_api: commit quotas
+    nova_api -> database: reservation_commit
+    note over database: store quota info
+    database -> nova_api: done
+else "failed case"
+    note over nova_api: rollback quota
+    nova_api -> database: reservation_rollback
+    note over database: update quota info
+    database -> nova_api: done
+end
+note over nova_api: build schedule filters
+note over nova_api: record instance CREATE action
+nova_api -> database: action_start
+note over database: store instance action
+database -> nova_api: instance action info
+note over nova_api: build instance
+nova_api --> task_queue: build_instances
+nova_api -> -client: created instance info and reservation_id
+
+# schedule
+task_queue -> nova_condutor: build_instances
+note over nova_condutor: build scheduler request
+nova_condutor -> task_queue: run_instance
+task_queue -> nova_scheduler: run_instance
+note over nova_scheduler: record schedule event start
+nova_scheduler -> database: action_event_start
+note over database: store event info
+database -> nova_scheduler: event info
+note over nova_scheduler: "notification: scheduler.run_instance.start"
+note over nova_scheduler: get all valid hosts
+note over nova_scheduler: choose a valid host
+note over nova_scheduler: "notification: scheduler.run_instance.scheduled"
+note over nova_scheduler: update instance info
+nova_scheduler -> database: instance_update
+note over database: update instance info
+database -> nova_scheduler: done
+nova_scheduler --> task_queue: run_instance
+task_queue -> nova_compute: run_instance
+note over nova_scheduler: "notification: scheduler.run_instance.end"
+note over nova_scheduler: record schedule event finish
+nova_scheduler -> database: action_event_finish
+note over database: store event info
+
+# nova compute
+note over nova_compute: get instance lock
+note over nova_compute: check if instance already exists on host
+note over nova_compute: update instance vm_state to BUILDING
+nova_compute -> nova_condutor: update instance
+nova_condutor -> database: update instance
+nova_condutor -> nova_compute: done
+nova over nova_compute: get image metadata
+nova_compute -> glance_api: show image
+glance_api -> nova_compute: image metadata
+note over nova_compute: "notification 'create.start'"
+note over nova_compute: get available nodes
+nova_compute -> nova_condutor: block_device_mapping_get_all_by_instance
+nova_condutor -> database: block_device_mapping_get_all_by_instance
+note over database: query instance block device mapping info
+database -> nova_condutor: block device mapping
+nova_condutor -> nova_compute: block device mapping
+note over nova_compute: get resource tracker
+alt "claim instance usage limits"
+    note over nova_compute: set instance host and node
+    note over nova_compute: update compute node usage
+    nova_compute -> nova_condutor: compute_node_update
+    nova_condutor -> database: save compute node usage info
+    database -> nova_condutor: done
+    nova_condutor -> nova_compute: done
+    note over nova_compute: generate MAC address for instance
+    note over nova_compute: get DHCP options for instance
+    note over nova_compute: update instance task_state to NETWORKING
+    nova_compute -> nova_condutor: update instance
+    nova_condutor -> database: update instance
+    nova_condutor -> nova_compute: done
+    nova_compute --> network_api: allocate_for_instance
+    note over nova_compute: update instance task_state to BLOCK_DEVICE_MAPPING
+    nova_compute -> nova_condutor: update instance
+    nova_condutor -> database: update instance
+    nova_condutor -> nova_compute: done
+    note over nova_compute: build block device info
+    note over nova_compute: update instance task_state to SPAWNING
+    nova_compute -> nova_condutor: update instance
+    nova_condutor -> database: update instance
+    nova_condutor -> nova_compute: done
+    note over nova_compute: create instance directory
+    note over nova_compute: clear instance console log
+    note over nova_compute: download kernel and ramdisk
+    nova_compute -> glance_api: download
+    glance_api -> nova_compute: done
+    note over nova_compute: download image
+    nova_compute -> glance_api: download
+    note over nova_compute: convert into raw format
+    note over nova_compute: create ephemeral and swap disk
+    alt "if instance need config drive"
+        note over nova_compute: fetch instance metadata
+        nova_compute -> nova_condutor: get_ec2_ids
+        nova_condutor -> nova_compute: ec2 ids
+        nova_compute -> network_api: get_instance_nw_info
+        network_api -> nova_compute: instance network info
+        note over nova_compute: get injected network template
+        note over nova_compute: handle injected files
+        note over nova_compute: create config drive
+    else "inject into instance file system"
+        note over nova_compute: get injected network template
+        note over nova_compute: inject data info instance file system
+        note over nova_compute: setup instance file system
+        note over nova_compute: inject data info file system
+        note over nova_compute: teardown instance file system
+    end
+    note over nova_compute: generate xml config file
+    note over nova_compute: connect attached volumes
+    note over nova_compute: plug instance virtual interface
+    note over nova_compute: setup instance nwfilter
+    nova_compute -> libvirtd: nwfilterDefineXML
+    note over nova_compute: prepare instance iptable rules
+    note over nova_compute: power on instance
+    nova_compute -> libvirtd: createWithFlags
+    libvirtd -> nova_compute: done
+    note over nova_compute: apply instance iptable rules
+    loop "wait until power_state is RUNNING"
+        note over nova_compute: get instance info
+        nova_compute -> libvirtd: lookupByName
+        note over nova_compute: read  power_state
+    end
+    note over nova_compute: update instance vm_state into ACTIVE and task_state to None
+    nova_compute -> nova_condutor: update instance
+    nova_condutor -> database: update instance
+    nova_condutor -> nova_compute: done
+    note over nova_compute: "notification 'create.end'"
+else "run_instance failed"
+    note over nova_compute: raise exception
+    note over nova_compute: "notification 'create.error'"
+end
+note over nova_compute: release lock
