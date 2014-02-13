@@ -1,0 +1,47 @@
+title Instance stop process
+
+participant client
+participant nova_api
+participant database
+participant task_queue
+participant nova_condutor
+participant nova_compute
+participant libvirtd
+
+# nova api
+client -> +nova_api: POST stop instance request
+note over nova_api: get instance info
+nova_api -> database: query instance info
+note over database: get instance info
+database -> nova_api: instance info
+
+alt "instance is not locked and vm_state in ACTIVE or RESCUED or ERROR"
+    note over nova_api: change task_state to POWERING_ON
+    note over nova_api: record STOP action
+    nova_api -> database: create a new action entry
+    note over database: store action entry
+    database -> nova_api: done
+    note over nova_api: stop_instance
+    nova_api --> task_queue: stop_instance
+else "raise exception"
+    note over nova_api: raise exception InstanceInvalidState
+end
+nova_api -> -client: request was accepted
+
+task_queue -> nova_compute: stop_instance
+note over nova_compute: "notification 'power_off.stop'"
+
+note over nova_compute: destroy instance
+nova_compute -> libvirtd: destroy instance
+libvirtd -> nova_compute: done
+loop "wait until power_state is RUNNING"
+    note over nova_compute: get instance info
+    nova_compute -> libvirtd: lookupByName
+    note over nova_compute: read  power_state
+end
+
+note over nova_compute: update instance vm_state into STOPPED and task_state to None
+nova_compute -> nova_condutor: update instance
+note over nova_condutor: save instance info
+nova_condutor -> nova_compute: done
+note over nova_compute: "notification 'power_off.end'"
