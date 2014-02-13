@@ -1,0 +1,132 @@
+title Instance reboot process
+
+participant client
+participant nova_api
+participant network_api
+participant glance_api
+participant database
+participant task_queue
+participant nova_condutor
+participant nova_compute
+participant libvirtd
+
+# nova api
+client -> +nova_api: POST reboot instance request
+note over nova_api: get instance info
+nova_api -> database: query instance info
+note over database: get instance info
+database -> nova_api: instance info
+
+
+alt "instance is not locked and vm_state and task_state"
+    note over nova_api: change task_state to REBOOTING
+    note over nova_api: record REBOOT action
+    nova_api -> database: create a new action entry
+    note over database: store action entry
+    database -> nova_api: done
+    note over nova_api: reboot_instance
+    nova_api --> task_queue: reboot_instance
+else "raise exception"
+    note over nova_api: raise exception InstanceInvalidState
+end
+nova_api -> -client: request was accepted
+
+task_queue -> nova_compute: reboot_instance
+
+note over nova_compute: get instance block device info
+nova_compute -> nova_condutor: get instance block device mapping
+note over nova_condutor: query instance block device mapping
+nova_condutor -> nova_compute: instance block device mapping
+
+note over nova_compute: get instance network info
+nova_compute -> network_api: get_instance_nw_info
+note over network_api: query instance network info
+network_api -> nova_compute: instance network info
+
+note over nova_compute: notification 'reboot.start'
+
+note over nova_compute: get instance power state
+nova_compute -> libvirtd: get instance info
+note over libvirtd: query instance info
+libvirtd -> nova_compute: instance info
+
+note over nova_compute: update instance power_state
+nova_compute -> nova_condutor: save instance info
+note over nova_condutor: store instance info
+nova_condutor -> nova_compute: done
+
+alt "reboot type is 'SOFT'"
+    note over nova_compute: get instance domain info
+    nova_compute -> libvirtd: get instance domain info
+    libvirtd -> nova_compute: instance domain info
+    note over nova_compute: shutdown instance if instance power_state is RUNNING
+    nova_compute -> libvirtd: shutdown
+    libvirtd -> nova_compute: done
+    note over nova_compute: detach all pci devices
+    nova_compute -> libvirtd: createWithFlags
+    libvirtd -> nova_compute: done
+    loop "wait until power_state is RUNNING"
+        note over nova_compute: get instance info
+        nova_compute -> libvirtd: lookupByName
+        libvirtd -> nova_compute: domain info
+        note over nova_compute: check if power_state is RUNNING
+    end
+end
+alt "reboot type is 'HARD' or soft reboot failed"
+    note over nova_compute: shutdown instance
+    nova_compute -> libvirtd: get instance info
+    libvirtd -> nova_compute: instance info
+    alt "instance is running"
+        note over nova_compute: destroy instance
+        nova_compute -> libvirtd: destroy instance
+        libvirtd -> nova_compute: done
+        note over nova_compute: wait util instance's power state is SHUTDOWN
+    end
+    note over nova_compute: get instance system metadata
+    note over nova_compute: get instance image metadata
+    alt "image metadata is none"
+        note over nova_compute: get instance image metadata from glance
+        nova_compute -> glance_api: show image
+        note over glance_api: query image info
+        glance_api -> nova_compute: instance image metadata
+    end
+    note over nova_compute: get instance disk info
+    note over nova_compute: generate xml config file
+    alt "make sure backing file exists"
+        note over nova_compute: check if backing file exists
+        nova_compute -> glance_api: fetch base image
+        note over glance_api: query image info
+        glance_api -> nova_compute: download link
+        note over nova_compute: download image
+        note over nova_compute: make backing file
+    end
+    alt "download kernel if image kernel_id is not none"
+        nova_compute -> glance_api: fetch image
+        glance_api -> nova_compute: image info
+        note over nova_compute: download kernel image 
+    end
+    alt "download ramdisk if image ramdisk_id is not none"
+        nova_compute -> glance_api: fetch image
+        glance_api -> nova_compute: image info
+        note over nova_compute: download ramdisk image 
+    end
+    note over nova_compute: connect attached volumes
+    note over nova_compute: plug instance virtual interface
+    note over nova_compute: setup instance nwfilter
+    nova_compute -> libvirtd: nwfilterDefineXML
+    note over nova_compute: prepare instance iptable rules
+    note over nova_compute: power on instance
+    nova_compute -> libvirtd: createWithFlags
+    libvirtd -> nova_compute: done
+    note over nova_compute: apply instance iptable rules
+end
+
+note over nova_compute: get instance power_state
+nova_compute -> libvirtd: get instance info
+libvirtd -> nova_compute: instance info
+note over nova_compute: update instance info
+nova_compute -> nova_condutor: save instance info
+note over nova_condutor: store instance info
+nova_condutor -> nova_compute: done
+
+note over nova_compute: notification 'reboot.end'
