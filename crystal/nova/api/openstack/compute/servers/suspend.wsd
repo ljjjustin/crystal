@@ -1,0 +1,66 @@
+title Instance suspend process
+
+participant client
+participant nova_api
+participant database
+participant task_queue
+participant nova_condutor
+participant nova_compute
+participant libvirtd
+
+# receive client request
+client -> +nova_api: POST suspend instance request
+
+note over nova_api: get instance info
+nova_api -> database: query instance info
+note over database: get instance info
+database -> nova_api: instance info
+
+alt "instance is not locked and vm_state is ACTIVE or RESCUED"
+
+    note over nova_api: record SUSPEND action
+    nova_api -> database: create a new action entry
+    note over database: store action entry
+    database -> nova_api: done
+
+    # call nova compute manager
+    note over nova_api: suspend_instance
+    nova_api --> task_queue: suspend_instance
+else "raise exception"
+    note over nova_api: raise exception InstanceInvalidState
+end
+
+# reply client
+nova_api -> -client: request was accepted
+
+# nova compute manager receive RPC request
+task_queue -> nova_compute: suspend_instance
+
+note over nova_compute: get instance info from libvirtd
+nova_compute -> libvirtd: lookupByName
+libvirtd -> nova_compute: instance info
+
+note over nova_compute: detach pci device
+nova_compute -> nova_condutor: get instance pci devices
+loop "detach pci device"
+    nova_compute -> libvirtd: detachDeviceFlags
+    note over libvirtd: detach pci device
+    note over libvirtd: modify instance config xml
+    libvirtd -> nova_compute: done
+end
+note over nova_compute: save instance to disk
+nova_compute -> libvirtd: managedSave
+libvirtd -> nova_compute: done
+
+note over nova_compute: update instance vm_state and power_state
+nova_compute -> libvirtd: get instance info
+note over libvirtd: query instance info
+libvirtd -> nova_compute: instance info
+note over nova_compute: set instance power_state
+note over nova_compute: set instance vm_state to SUSPENDED
+note over nova_compute: save instance info
+nova_compute -> nova_condutor: update instance info
+note over nova_condutor: instance info
+nova_condutor -> nova_compute: done 
+
+note over nova_compute: notification 'suspend'
