@@ -29,7 +29,7 @@ end
 nova_api -> -client: request was accepted
 
 task_queue -> nova_compute: stop_instance
-note over nova_compute: "notification 'power_off.stop'"
+note over nova_compute: "notification 'power_off.start'"
 
 note over nova_compute: destroy instance
 nova_compute -> libvirtd: destroy instance
