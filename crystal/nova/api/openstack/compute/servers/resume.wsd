@@ -1,0 +1,96 @@
+title Instance resume process
+
+participant client
+participant nova_api
+participant network_api
+participant database
+participant task_queue
+participant nova_condutor
+participant nova_compute
+participant libvirtd
+
+# receive client request
+client -> +nova_api: POST resume instance request
+
+note over nova_api: get instance info
+nova_api -> database: query instance info
+note over database: get instance info
+database -> nova_api: instance info
+
+alt "instance is not locked and vm_state is SUSPENDED"
+    note over nova_api: update task_state to RESUMING
+
+    note over nova_api: record RESUME action
+    nova_api -> database: create a new action entry
+    note over database: store action entry
+    database -> nova_api: done
+
+    # call nova compute manager
+    note over nova_api: resume_instance
+    nova_api --> task_queue: resume_instance
+else "raise exception"
+    note over nova_api: raise exception InstanceInvalidState
+end
+
+# reply client
+nova_api -> -client: request was accepted
+
+# nova compute manager receive RPC request
+task_queue -> nova_compute: resume_instance
+
+note over nova_compute: get instance network info
+nova_compute -> network_api: get_instance_nw_info
+note over network_api: query instance network info
+network_api -> nova_compute: instance network info
+
+note over nova_compute: get instance block device mapping
+nova_compute -> nova_condutor: get instance block device mapping
+note over nova_condutor: query instance block device mapping
+nova_condutor -> nova_compute: instance block device mapping
+
+note over nova_compute: get instance config xml
+nova_compute -> libvirtd: get instance info
+note over libvirtd: lookupByName
+libvirtd -> nova_compute: instance info
+alt "if get instance info from libvirtd failed"
+    note over nova_compute: get image metadata
+    nova_compute -> glance_api: show image
+    note over glance_api: query image info
+    glance_api -> nova_compute: image metadata
+    note over nova_compute: generate xml config file
+end
+
+note over nova_compute: connect attached volumes
+note over nova_compute: plug instance virtual interface
+note over nova_compute: setup instance nwfilter
+nova_compute -> libvirtd: nwfilterDefineXML
+note over nova_compute: prepare instance iptable rules
+note over nova_compute: power on instance
+nova_compute -> libvirtd: createWithFlags
+libvirtd -> nova_compute: done
+note over nova_compute: apply instance iptable rules
+loop "wait until power_state is RUNNING"
+    note over nova_compute: get instance info
+    nova_compute -> libvirtd: lookupByName
+    note over nova_compute: read  power_state
+end
+
+note over nova_compute: attach pci device
+loop "attach pci device"
+    nova_compute -> libvirtd: attachDevice
+    note over libvirtd: attach pci device
+    libvirtd -> nova_compute: done
+end
+
+note over nova_compute: update instance vm_state and power_state
+nova_compute -> libvirtd: get instance info
+note over libvirtd: query instance info
+libvirtd -> nova_compute: instance info
+note over nova_compute: set instance power_state
+note over nova_compute: set instance vm_state to ACTIVE
+note over nova_compute: save instance info
+nova_compute -> nova_condutor: update instance info
+note over nova_condutor: instance info
+nova_condutor -> nova_compute: done 
+
+note over nova_compute: notification 'resume'
