@@ -1,0 +1,200 @@
+title Instance rebuild process
+
+participant client
+participant nova_api
+participant network_api
+participant glance_api
+participant database
+participant task_queue
+participant nova_condutor
+participant nova_compute
+participant libvirtd
+
+# receive client request
+client -> +nova_api: POST rebuild instance request
+
+note over nova_api: extract image uuid from request body
+note over nova_api: extract admin password from request body
+
+note over nova_api: get instance info
+nova_api -> database: query instance info
+note over database: get instance info
+database -> nova_api: instance info
+
+note over nova_api: check parameters from request body
+
+alt "instance is not locked and vm_state is ACTIVE or STOPPED or ERROR"
+    note over nova_api: get image metadata
+    nova_api -> glance_api: show image info
+    note over glance_api: query image info
+    glance_api -> nova_api: image metadata
+
+    note over nova_api: extract flavor info from instance system metadata
+    note over nova_api: check metadata quota
+    note over nova_api: check injected file quota
+    note over nova_api: check if flavor disk is big enough
+
+    note over nova_api: check if image has kernel and ramdisk image
+    opt "image has kernel and ramdisk"
+        nova_api -> glance_api: show image
+        note over glance_api: query image info
+        glance_api -> nova_api: image info
+    end
+
+    note over nova_api: update task_state to REBUILDING
+    note over nova_api: update instance info
+    nova_api -> database: save instance info
+    note over database: update instance info
+    database -> nova_api: done
+
+    note over nova_api: reset instance system metadata from new image
+    note over nova_api: save instance system metadata
+    nova_api -> database: save instance info
+    note over database: update instance info
+    database -> nova_api: done
+
+    note over nova_api: build block device mapping
+    nova_api -> database: get instance block device mapping
+    note over database: query instance block device mapping
+    database -> nova_api: instance block device mapping info
+
+    note over nova_api: record REBUILD action
+    nova_api -> database: create a new action entry
+    note over database: store action entry
+    database -> nova_api: done
+
+    # call nova compute manager
+    note over nova_api: rebuild_instance
+    nova_api --> task_queue: rebuild_instance
+else "raise exception"
+    note over nova_api: raise exception InstanceInvalidState
+end
+
+# reply client
+nova_api -> -client: request was accepted
+
+# nova compute manager receive RPC request
+task_queue -> nova_compute: rebuild_instance
+
+note over nova_compute: get old image url
+nova_compute -> glance_api: show old image
+note over glance_api: query image metadata
+glance_api -> nova_compute: image metadata
+
+note over nova_compute: send usage exists notification
+nova_compute -> nova_condutor: usage notification
+note over nova_condutor: send usage notification
+nova_condutor -> nova_compute: done
+
+note over nova_compute: notification 'rebuild.start'
+note over nova_compute: update task_state to REBUILDING
+
+opt "recreate is true"
+    note over nova_compute: setup network for instance
+    nova_compute -> network_api: set_networks_on_host
+    note over network_api: setup network for instance
+    network_api -> nova_compute: done
+end
+
+note over nova_compute: get instance network info
+nova_compute -> network_api: get_instance_nw_info
+note over network_api: query instance network info
+network_api -> nova_compute: instance network info
+
+note over nova_compute: get instance block device mapping
+nova_compute -> nova_condutor: block_device_mapping_get_all_by_instance
+note over nova_condutor: query instance block device mapping
+nova_condutor -> nova_compute: instance block device mapping
+
+note over nova_compute: decode injected files
+
+# rebuild instance
+note over nova_compute: detach instance block device
+
+## destroy instance
+note over nova_compute: get instance info from libvirtd
+nova_compute -> libvirtd: lookupByName
+libvirtd -> nova_compute: instance info
+nova_compute -> libvirtd: destroy instance
+libvirtd -> nova_compute: done
+nova_compute -> libvirtd: undefine instance
+libvirtd -> nova_compute: done
+
+note over nova_compute: unplug instance virtual interface
+note over nova_compute: clear instance iptable rules
+
+## attach block device
+note over nova_compute: update task_state to REBUILD_BLOCK_DEVICE_MAPPING
+note over nova_compute: attach block device
+
+## spawn
+note over nova_compute: update task_state to REBUILD_SPAWNING
+note over nova_compute: create instance directory
+note over nova_compute: clear instance console log
+note over nova_compute: download kernel and ramdisk
+nova_compute -> glance_api: download
+glance_api -> nova_compute: done
+note over nova_compute: download image
+nova_compute -> glance_api: download
+note over nova_compute: convert into raw format
+note over nova_compute: create ephemeral and swap disk
+alt "if instance need config drive"
+    note over nova_compute: fetch instance metadata
+    nova_compute -> nova_condutor: get_ec2_ids
+    nova_condutor -> nova_compute: ec2 ids
+    nova_compute -> network_api: get_instance_nw_info
+    network_api -> nova_compute: instance network info
+    note over nova_compute: get injected network template
+    note over nova_compute: handle injected files
+    note over nova_compute: create config drive
+else "inject into instance file system"
+    note over nova_compute: get injected network template
+    note over nova_compute: inject data info instance file system
+    note over nova_compute: setup instance file system
+    note over nova_compute: inject data info file system
+    note over nova_compute: teardown instance file system
+end
+note over nova_compute: generate xml config file
+note over nova_compute: connect attached volumes
+note over nova_compute: plug instance virtual interface
+note over nova_compute: setup instance nwfilter
+nova_compute -> libvirtd: nwfilterDefineXML
+note over nova_compute: prepare instance iptable rules
+note over nova_compute: power on instance
+nova_compute -> libvirtd: createWithFlags
+libvirtd -> nova_compute: done
+note over nova_compute: apply instance iptable rules
+loop "wait until power_state is RUNNING"
+    note over nova_compute: get instance info
+    nova_compute -> libvirtd: lookupByName
+    note over nova_compute: read power_state
+end
+
+note over nova_compute: update instance vm_state into ACTIVE and task_state to None
+nova_compute -> nova_condutor: update instance
+nova_condutor -> database: update instance
+nova_condutor -> nova_compute: done
+
+opt "instance origin state is STOPPED"
+    # stop instance
+    note over nova_compute: update task_state to POWERING_OFF
+
+    note over nova_compute: notification 'power_off.start'
+
+    note over nova_compute: destroy instance
+    nova_compute -> libvirtd: destroy instance
+    libvirtd -> nova_compute: done
+    loop "wait until power_state is SHUTDOWN"
+        note over nova_compute: get instance info
+        nova_compute -> libvirtd: lookupByName
+        note over nova_compute: read power_state
+    end
+
+    note over nova_compute: update instance vm_state into STOPPED and task_state to None
+    nova_compute -> nova_condutor: update instance
+    note over nova_condutor: save instance info
+    nova_condutor -> nova_compute: done
+    note over nova_compute: notification 'power_off.end'
+end
+
+note over nova_compute: notification 'rebuild.end'
