@@ -72,7 +72,7 @@ def update_diagrams_by_dir(source_dir, target_dir):
 
 if __name__ == '__main__':
 
-    source_dir = os.path.join(topdir, 'crystal')
-    target_dir = os.path.join(topdir, 'diagrams')
+    source_dir = os.path.join(topdir, 'crystal', 'source')
+    target_dir = os.path.join(topdir, 'crystal', 'target')
 
     update_diagrams_by_dir(source_dir, target_dir)
